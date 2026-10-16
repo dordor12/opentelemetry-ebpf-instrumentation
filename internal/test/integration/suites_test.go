@@ -890,6 +890,22 @@ func TestSuite_PythonAsyncGeneric_3_14(t *testing.T) {
 	require.NoError(t, compose.Close())
 }
 
+// Ubuntu's CPython 3.12 inlines _asyncio's task_step, so most task steps only
+// enter task_step_impl
+func TestSuite_PythonAsyncGeneric_Ubuntu_3_12(t *testing.T) {
+	compose, err := docker.ComposeSuite("docker-compose-python-async-generic-ubuntu-3.12.yml", path.Join(pathOutput, "test-suite-python-async-generic-ubuntu-3_12.log"))
+	require.NoError(t, err)
+	require.NoError(t, compose.Up())
+
+	t.Run("Sequential", testPythonAsyncGenericSequential)
+	t.Run("Concurrent", testPythonAsyncGenericConcurrent)
+	t.Run("To Thread", testPythonAsyncGenericToThread)
+	t.Run("Nested", testPythonAsyncGenericNested)
+	t.Run("Keep-Alive", testPythonAsyncGenericKeepAlive)
+	runWeaverValidation(t)
+	require.NoError(t, compose.Close())
+}
+
 func TestSuite_PythonRedis(t *testing.T) {
 	compose, err := docker.ComposeSuite("docker-compose-python-redis.yml", path.Join(pathOutput, "test-suite-python-redis.log"))
 	require.NoError(t, err)

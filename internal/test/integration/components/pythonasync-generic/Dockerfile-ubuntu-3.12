@@ -1,0 +1,27 @@
+# Ubuntu's CPython 3.12 build inlines _asyncio's task_step into its callers,
+# which then call task_step_impl directly, so most task steps never enter
+# task_step.
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+EXPOSE 8392
+
+# The distro _asyncio module is stripped and OBI attaches to its static
+# functions by symbol name, so merge back the debug symbols that python3.12-dbg
+# ships for it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 python3-httpx python3-requests python3.12-dbg elfutils \
+    && so=$(python3 -c 'import _asyncio; print(_asyncio.__file__)') \
+    && build_id=$(eu-readelf -n "$so" | awk '/Build ID/ {print $NF}') \
+    && debug=/usr/lib/debug/.build-id/$(echo "$build_id" | cut -c1-2)/$(echo "$build_id" | cut -c3-).debug \
+    && eu-unstrip -o "$so.unstripped" "$so" "$debug" \
+    && mv "$so.unstripped" "$so" \
+    && apt-get purge -y python3.12-dbg elfutils \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY internal/test/integration/components/pythonasync-common/cancelled_to_thread.py .
+COPY internal/test/integration/components/pythonasync-generic .
+
+CMD ["python3", "async_server_test.py"]
