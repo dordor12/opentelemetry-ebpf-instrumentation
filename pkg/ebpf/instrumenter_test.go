@@ -113,6 +113,7 @@ const (
 
 type testELFSymbol struct {
 	name   string
+	kind   elf.SymType
 	bind   elf.SymBind
 	offset uint64
 }
@@ -121,11 +122,18 @@ func TestGatherOffsetsAddsColdPartReturns(t *testing.T) {
 	machine, text := coldSplitText()
 	elfFile := buildTextELF(t, machine, text, []testELFSymbol{
 		// local symbols precede global ones, so a cold part comes before its function
-		{name: "split.cold", bind: elf.STB_LOCAL, offset: 0x00},
-		{name: "multi", bind: elf.STB_LOCAL, offset: 0x20},
-		{name: "multi.cold.1", bind: elf.STB_LOCAL, offset: 0x30},
-		{name: "splitter.cold", bind: elf.STB_LOCAL, offset: 0x40},
-		{name: "split", bind: elf.STB_GLOBAL, offset: 0x10},
+		{name: "a.c", kind: elf.STT_FILE, bind: elf.STB_LOCAL},
+		{name: "split.cold", kind: elf.STT_FUNC, bind: elf.STB_LOCAL, offset: 0x00},
+		{name: "multi", kind: elf.STT_FUNC, bind: elf.STB_LOCAL, offset: 0x20},
+		{name: "multi.cold.1", kind: elf.STT_FUNC, bind: elf.STB_LOCAL, offset: 0x30},
+		{name: "splitter.cold", kind: elf.STT_FUNC, bind: elf.STB_LOCAL, offset: 0x40},
+		// another unit's parts belong to its own static split, and to a
+		// global multi rather than the static one in a.c
+		{name: "b.c", kind: elf.STT_FILE, bind: elf.STB_LOCAL},
+		{name: "split", kind: elf.STT_FUNC, bind: elf.STB_LOCAL, offset: 0x20},
+		{name: "split.cold", kind: elf.STT_FUNC, bind: elf.STB_LOCAL, offset: 0x40},
+		{name: "multi.cold", kind: elf.STT_FUNC, bind: elf.STB_LOCAL, offset: 0x40},
+		{name: "split", kind: elf.STT_FUNC, bind: elf.STB_GLOBAL, offset: 0x10},
 	})
 	defer elfFile.Close()
 
@@ -146,7 +154,8 @@ func TestGatherOffsetsAddsColdPartReturns(t *testing.T) {
 }
 
 // buildTextELF writes an ELF whose only segment maps text, with a .symtab of
-// functions that take one textSlotSize slot each, local ones listed first.
+// functions that take one textSlotSize slot each, local ones listed first
+// after the STT_FILE symbols that scope them.
 // debug/elf looks sections up by type, so they have no names.
 func buildTextELF(t *testing.T, machine elf.Machine, text []byte, symbols []testELFSymbol) *elf.File {
 	t.Helper()
@@ -164,13 +173,17 @@ func buildTextELF(t *testing.T, machine elf.Machine, text []byte, symbols []test
 		if symbol.bind == elf.STB_LOCAL {
 			firstGlobal++
 		}
-		symtab = append(symtab, elf.Sym64{
+		entry := elf.Sym64{
 			Name:  uint32(len(strtab)),
-			Info:  elf.ST_INFO(symbol.bind, elf.STT_FUNC),
+			Info:  elf.ST_INFO(symbol.bind, symbol.kind),
 			Shndx: textSection,
 			Value: testELFTextAddress + symbol.offset,
 			Size:  textSlotSize,
-		})
+		}
+		if symbol.kind == elf.STT_FILE {
+			entry = elf.Sym64{Name: entry.Name, Info: entry.Info, Shndx: uint16(elf.SHN_ABS)}
+		}
+		symtab = append(symtab, entry)
 		strtab = append(strtab, symbol.name...)
 		strtab = append(strtab, 0)
 	}

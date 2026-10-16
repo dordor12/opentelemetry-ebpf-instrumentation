@@ -118,19 +118,32 @@ func collectSymbols(
 	f *elf.File,
 	syms []elf.Symbol,
 	collectors []symbolCollector,
-	coldParts map[string][]Sym,
+	cold *coldParts,
 	types ...elf.SymType,
 ) {
 	if len(types) == 0 {
 		types = []elf.SymType{elf.STT_FUNC}
 	}
+
+	// local symbols follow the STT_FILE symbol of their translation unit
+	file := ""
 	for _, s := range syms {
+		if elf.ST_TYPE(s.Info) == elf.STT_FILE {
+			file = s.Name
+			continue
+		}
+
 		if !slices.Contains(types, elf.ST_TYPE(s.Info)) {
 			continue
 		}
 
+		scope := symbolScope{local: elf.ST_BIND(s.Info) == elf.STB_LOCAL}
+		if scope.local {
+			scope.file = file
+		}
+
 		if parent, ok := coldPartParent(s); ok && collectorsMatch(collectors, parent) {
-			coldParts[parent] = append(coldParts[parent], resolveSymbol(f, s))
+			cold.parts = append(cold.parts, coldPart{file: file, parent: parent, sym: resolveSymbol(f, s)})
 		}
 
 		var sym *Sym
@@ -145,6 +158,10 @@ func collectSymbols(
 				sym = &resolvedSym
 			}
 			collector.addresses[key] = *sym
+		}
+
+		if sym != nil {
+			cold.addFunction(s.Name, scope)
 		}
 	}
 }
@@ -182,9 +199,75 @@ func coldPartParent(s elf.Symbol) (string, bool) {
 	return parent, true
 }
 
-func addColdParts(addresses map[string]Sym, coldParts map[string][]Sym) {
+// symbolScope tells where a function name is unique: globals are unique in the
+// object, locals only in the translation unit (STT_FILE) they belong to.
+type symbolScope struct {
+	file  string
+	local bool
+}
+
+type coldPart struct {
+	file   string
+	parent string
+	sym    Sym
+}
+
+// coldParts matches cold parts to functions by translation unit, since static
+// functions in different units can share a name. A part belongs to the local
+// function with its parent name in its unit or, when there is none, to the
+// global function with that name.
+type coldParts struct {
+	parts []coldPart
+	// scope of the last collected function of each name, which is the one
+	// that ends up in the collector addresses
+	scopes map[string]symbolScope
+	// names of the local functions in each unit
+	locals map[symbolScope]map[string]bool
+}
+
+func newColdParts() *coldParts {
+	return &coldParts{
+		scopes: map[string]symbolScope{},
+		locals: map[symbolScope]map[string]bool{},
+	}
+}
+
+func (c *coldParts) addFunction(name string, scope symbolScope) {
+	c.scopes[name] = scope
+	if !scope.local {
+		return
+	}
+
+	if c.locals[scope] == nil {
+		c.locals[scope] = map[string]bool{}
+	}
+	c.locals[scope][name] = true
+}
+
+func (c *coldParts) of(name string) []Sym {
+	scope := c.scopes[name]
+
+	var parts []Sym
+	for _, part := range c.parts {
+		if part.parent != name {
+			continue
+		}
+
+		partScope := symbolScope{file: part.file, local: true}
+		if scope.local && partScope != scope {
+			continue
+		}
+		if !scope.local && c.locals[partScope][name] {
+			continue
+		}
+		parts = append(parts, part.sym)
+	}
+	return parts
+}
+
+func (c *coldParts) addTo(addresses map[string]Sym) {
 	for key, sym := range addresses {
-		if parts, ok := coldParts[sym.Name]; ok {
+		if parts := c.of(sym.Name); len(parts) > 0 {
 			sym.ColdParts = parts
 			addresses[key] = sym
 		}
@@ -218,24 +301,24 @@ func FindExeSymbolsByNameAndSubstring(f *elf.File, symbolNames, symbolSubstrings
 	}
 
 	// cold parts are local symbols, so they can precede the global they belong to
-	coldParts := map[string][]Sym{}
+	cold := newColdParts()
 
 	syms, err := f.Symbols()
 	if err != nil && !errors.Is(err, elf.ErrNoSymbols) {
 		return nil, nil, err
 	}
 
-	collectSymbols(f, syms, collectors, coldParts, types...)
+	collectSymbols(f, syms, collectors, cold, types...)
 
 	dynsyms, err := f.DynamicSymbols()
 	if err != nil && !errors.Is(err, elf.ErrNoSymbols) {
 		return nil, nil, err
 	}
 
-	collectSymbols(f, dynsyms, collectors, coldParts, types...)
+	collectSymbols(f, dynsyms, collectors, cold, types...)
 
-	addColdParts(exactAddresses, coldParts)
-	addColdParts(substringAddresses, coldParts)
+	cold.addTo(exactAddresses)
+	cold.addTo(substringAddresses)
 
 	return exactAddresses, substringAddresses, nil
 }
